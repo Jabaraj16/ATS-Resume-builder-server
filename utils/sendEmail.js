@@ -31,7 +31,7 @@ const sendEmail = async (options) => {
 
     // 2. Define email options
     const mailOptions = {
-        from: `Resume Builder <${process.env.SMTP_USER}>`,
+        from: `Resume Builder <${process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER}>`,
         to: options.email,
         subject: options.subject,
         text: options.message,
