@@ -82,20 +82,29 @@ exports.register = async (req, res) => {
 exports.verifyOTP = async (req, res) => {
     try {
         const { email, otp } = req.body;
+        console.log(`[VERIFY OTP] Request for Email: ${email}, OTP: ${otp}`);
 
         // 1. Find in TEMP database
         const tempUser = await TempUser.findOne({ email }).select('+password');
 
         if (!tempUser) {
+            console.log(`[VERIFY OTP] TempUser not found for: ${email}`);
             return res.status(400).json({ success: false, message: 'Invalid or expired registration session. Please register again.' });
         }
 
+        console.log(`[VERIFY OTP] Found TempUser: ${tempUser.email}`);
+        console.log(`[VERIFY OTP] Stored OTP: '${tempUser.otp}'`);
+        console.log(`[VERIFY OTP] Received OTP: '${otp}'`);
+
         // 2. Verify OTP
-        if (tempUser.otp !== otp) {
+        if (tempUser.otp.trim() !== otp.trim()) {
+            console.log(`[VERIFY OTP] FAILED: Mismatch`);
             return res.status(400).json({ success: false, message: 'Invalid OTP' });
         }
 
-        if (tempUser.otpExpires < Date.now()) {
+        const now = Date.now();
+        if (tempUser.otpExpires < now) {
+            console.log(`[VERIFY OTP] FAILED: Expired. Expires: ${tempUser.otpExpires}, Now: ${now}`);
             return res.status(400).json({ success: false, message: 'OTP expired. Please register again.' });
         }
 
