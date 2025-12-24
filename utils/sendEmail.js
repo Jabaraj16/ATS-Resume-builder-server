@@ -2,9 +2,11 @@ const nodemailer = require('nodemailer');
 
 const sendEmail = async (options) => {
     // 1. Create a transporter
+    // Use Port 465 (SSL) which is often less restricted on cloud servers than 587
     const transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST,
-        port: process.env.SMTP_PORT,
+        host: process.env.SMTP_HOST || 'smtp.gmail.com',
+        port: 465,
+        secure: true, // true for 465, false for other ports
         auth: {
             user: process.env.SMTP_USER,
             pass: process.env.SMTP_PASS
