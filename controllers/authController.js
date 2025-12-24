@@ -200,34 +200,48 @@ exports.verifyOTP = async (req, res) => {
 exports.resendOTP = async (req, res) => {
     try {
         const { email } = req.body;
+
+        // 1. Check TempUser (for registration flow)
+        let tempUser = await TempUser.findOne({ email });
+
+        if (tempUser) {
+            const otp = generateOTP();
+            tempUser.otp = otp;
+            tempUser.otpExpires = Date.now() + 10 * 60 * 1000;
+            await tempUser.save();
+
+            const message = `Your new OTP for Resume Builder registration is: ${otp}\n\nIt expires in 10 minutes.`;
+
+            try {
+                await sendEmail({
+                    email: tempUser.email,
+                    subject: 'Resume Builder - Resend OTP',
+                    message
+                });
+
+                return res.status(200).json({ success: true, message: 'OTP resent to email' });
+            } catch (err) {
+                return res.status(500).json({ success: false, message: 'Email could not be sent' });
+            }
+        }
+
+        // 2. Check Real User (only if not verified? but verified users don't need OTP typically unless login 2FA)
+        // For now, if not in TempUser, user might have expired or not registered.
+        // We can check if user is in main DB but unverified (legacy) or just return error.
+
         const user = await User.findOne({ email });
+        if (user && !user.isVerified) {
+            const otp = generateOTP();
+            user.otp = otp;
+            user.otpExpires = Date.now() + 10 * 60 * 1000;
+            await user.save();
 
-        if (!user) {
-            return res.status(400).json({ success: false, message: 'User not found' });
+            const message = `Your new OTP for Resume Builder registration is: ${otp}\n\nIt expires in 10 minutes.`;
+            await sendEmail({ email: user.email, subject: 'Resume Builder - Resend OTP', message });
+            return res.status(200).json({ success: true, message: 'OTP resent to email' });
         }
 
-        if (user.isVerified) {
-            return res.status(400).json({ success: false, message: 'User already verified' });
-        }
-
-        const otp = generateOTP();
-        user.otp = otp;
-        user.otpExpires = Date.now() + 10 * 60 * 1000;
-        await user.save();
-
-        const message = `Your new OTP for Resume Builder registration is: ${otp}\n\nIt expires in 10 minutes.`;
-
-        try {
-            await sendEmail({
-                email: user.email,
-                subject: 'Resume Builder - Resend OTP',
-                message
-            });
-
-            res.status(200).json({ success: true, message: 'OTP resent to email' });
-        } catch (err) {
-            return res.status(500).json({ success: false, message: 'Email could not be sent' });
-        }
+        return res.status(400).json({ success: false, message: 'Registration session expired or user not found. Please register again.' });
 
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
