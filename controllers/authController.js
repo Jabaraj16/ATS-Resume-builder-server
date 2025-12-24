@@ -1,4 +1,5 @@
 const User = require('../models/User');
+const TempUser = require('../models/TempUser');
 const jwt = require('jsonwebtoken');
 const sendEmail = require('../utils/sendEmail');
 const crypto = require('crypto');
@@ -8,50 +9,65 @@ const generateOTP = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
-// @desc    Register user & Send OTP
+// @desc    Register user (Temporary) & Send OTP
 // @route   POST /api/auth/register
 // @access  Public
 exports.register = async (req, res) => {
     try {
         const { name, email, password } = req.body;
 
+        // 1. Check if user already exists in MAIN database
         const userExists = await User.findOne({ email });
-
         if (userExists) {
             return res.status(400).json({ success: false, message: 'User already exists' });
         }
 
+        // 2. Generate OTP
         const otp = generateOTP();
-        const otpExpires = Date.now() + 10 * 60 * 1000; // 10 minutes from now
+        const otpExpires = Date.now() + 10 * 60 * 1000; // 10 minutes
 
-        const user = await User.create({
-            name,
-            email,
-            password,
-            otp,
-            otpExpires,
-            isVerified: false
-        });
+        // 3. Update or Create in TEMP database
+        // We use findOneAndUpdate with upsert to handle re-sending/overwriting pending registrations
+        // Note: We must explicitly hash password here if using findOneAndUpdate, OR use save() logic.
+        // Using save() is cleaner for middleware (hashing) to run, so let's check duplicates manually.
 
-        // Send OTP via Email
+        let tempUser = await TempUser.findOne({ email });
+        if (tempUser) {
+            // Update existing pending user
+            tempUser.name = name;
+            tempUser.password = password; // Request body password (plain), will be hashed by pre-save
+            tempUser.otp = otp;
+            tempUser.otpExpires = otpExpires;
+            await tempUser.save();
+        } else {
+            // Create new pending user
+            tempUser = await TempUser.create({
+                name,
+                email,
+                password,
+                otp,
+                otpExpires
+            });
+        }
+
+        // 4. Send OTP via Email
         const message = `Your OTP for Resume Builder registration is: ${otp}\n\nIt expires in 10 minutes.`;
 
         try {
             await sendEmail({
-                email: user.email,
-                subject: 'Resume Builder - Email Verification OTP',
+                email: tempUser.email,
+                subject: 'Resume Builder - Verify Your Email',
                 message
             });
 
             res.status(200).json({
                 success: true,
                 message: 'OTP sent to email. Please verify to complete registration.',
-                email: user.email // Send back email to help frontend context
+                email: tempUser.email
             });
         } catch (err) {
             console.error(err);
-            // If email fails, delete user so they can try again (or handle gracefully)
-            await User.findByIdAndDelete(user._id);
+            await TempUser.findByIdAndDelete(tempUser._id);
             return res.status(500).json({ success: false, message: 'Email could not be sent. Please try again.' });
         }
 
@@ -60,38 +76,109 @@ exports.register = async (req, res) => {
     }
 };
 
-// @desc    Verify OTP
+// @desc    Verify OTP & Create Real User
 // @route   POST /api/auth/verify-otp
 // @access  Public
 exports.verifyOTP = async (req, res) => {
     try {
         const { email, otp } = req.body;
 
-        const user = await User.findOne({ email }).select('+otp +otpExpires');
+        // 1. Find in TEMP database
+        const tempUser = await TempUser.findOne({ email }).select('+password');
 
-        if (!user) {
-            return res.status(400).json({ success: false, message: 'User not found' });
+        if (!tempUser) {
+            return res.status(400).json({ success: false, message: 'Invalid or expired registration session. Please register again.' });
         }
 
-        if (user.isVerified) {
-            return res.status(400).json({ success: false, message: 'User already verified. Please login.' });
-        }
-
-        if (user.otp !== otp) {
+        // 2. Verify OTP
+        if (tempUser.otp !== otp) {
             return res.status(400).json({ success: false, message: 'Invalid OTP' });
         }
 
-        if (user.otpExpires < Date.now()) {
-            return res.status(400).json({ success: false, message: 'OTP expired. Please resend.' });
+        if (tempUser.otpExpires < Date.now()) {
+            return res.status(400).json({ success: false, message: 'OTP expired. Please register again.' });
         }
 
-        // Verify User
-        user.isVerified = true;
-        user.otp = undefined;
-        user.otpExpires = undefined;
-        await user.save();
+        // 3. Create REAL User
+        // Note: tempUser.password is already hashed. User model might try to re-hash it if we are not careful.
+        // If User model has pre-save hook that hashes if modified...
+        // We should pass the HASHED password and ensure User model doesn't double-hash.
+        // Usually, pre-save checks `isModified('password')`. If we set it, it is modified.
+        // Trick: Set the hashed password directly and avoid triggering pre-save? 
+        // Or better: The TempUser password IS encrypted. The User model expects a plain password to encrypt?
+        // Let's look at User.js. It likely has a pre-save hook.
+        // If we duplicate the hash, bcrypt will limit it but it's messy.
+        // EASIEST WAY: We should strictly copy the fields.
 
-        sendTokenResponse(user, 200, res);
+        // HOWEVER, Mongoose `create` triggers save.
+        // Fix: Update User model to only hash if password doesn't look like a hash? Or just trust the `isModified`?
+        // Actually, if we pass the hashed string as 'password', logic treats it as new plain text.
+
+        // ALTERNATIVE: Don't hash in TempUser? Store plain text? DANGEROUS.
+
+        // SOLUTION: Use Mongoose `insertMany` (bypasses middleware) or careful logic. 
+        // Let's try `current User` creation. If I pass the hashed password, and the pre-save hook runs...
+        // The pre-save hook: `if (!this.isModified('password')) return next(); ... bcrypt.hash...`
+        // It WILL double hash.
+
+        // FIX: Let's create the User instance, set fields manually, and SAVE.
+        // But we need to bypass the hook? 
+
+        // Wait, simplify. Why not just let TempUser NOT hash the password?
+        // "Don't save credentials". Storing plain text password in DB (even Temp) is bad practice.
+        // But it's only for 10 minutes.
+        // Still, let's stick to hashing in TempUser.
+
+        // Strategy: When creating User, we can set `user.password = tempUser.password`.
+        // Then we can use `User.findByIdAndUpdate` (upsert/create) or `User.collection.insertOne` to bypass Mongoose middleware.
+
+        // Let's use `await User.create({...})` but we need to know if we can disable hook.
+        // No easy way.
+
+        // OK, I will remove the pre-save hook from TempUser for now OR I will use `User.collection.insertOne` (native driver) which definitely skips hooks.
+        // `User.create` calls `save()`.
+
+        // Let's go with `User.create` but we need the PLAIN password?
+        // If TempUser has hashed password, we can't get plain password back.
+        // So we MUST NOT hash in TempUser if we want to use standard User registration logic.
+        // OR we manually write to DB.
+
+        // Decision: I will modify TempUser to NOT hash password. 
+        // PRO: Simpler flow. CON: Plain text password in TempUser for 10m.
+        // Given the requirement "Don't save credentials" was for the *permanent* DB, this is a tradeoff. 
+        // BUT storing plain text passwords is never good.
+
+        // BETTER Decision: Hash in TempUser. Use `new User(...)` then overwrite password field directly on the document object? No.
+        // Use `User.collection.insertOne(doc)`. This inserts raw JSON.
+        // We need to match the schema structure (e.g. `_id`, `createdAt`).
+
+        const finalUser = new User({
+            name: tempUser.name,
+            email: tempUser.email,
+            password: tempUser.password, // Hashed
+            isVerified: true
+        });
+
+        // We want to save this WITHOUT running the pre-save hook (which hashes).
+        // Since we are validating structure, let's just insert it raw.
+        await User.collection.insertOne({
+            name: finalUser.name,
+            email: finalUser.email,
+            password: finalUser.password,
+            isVerified: true,
+            role: 'user', // default
+            createdAt: new Date(),
+            __v: 0
+        });
+
+        // 4. Delete TempUser
+        await TempUser.findByIdAndDelete(tempUser._id);
+
+        // 5. Send Token (Auto Login)
+        // We need the `_id` for the token. `insertOne` returns result.
+        // Actually, `finalUser._id` is generated by `new User`. We can use that.
+
+        sendTokenResponse(finalUser, 201, res);
 
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
