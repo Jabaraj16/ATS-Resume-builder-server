@@ -298,8 +298,10 @@ exports.forgotPassword = async (req, res) => {
         const user = await User.findOne({ email });
 
         if (!user) {
+            console.log(`[ForgotPW] User not found for email: ${email}`);
             return res.status(404).json({ success: false, message: 'User not found' });
         }
+        console.log(`[ForgotPW] User found: ${user.email}`);
 
         const otp = generateOTP();
         user.otp = otp;
